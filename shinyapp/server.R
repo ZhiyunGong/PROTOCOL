@@ -21,7 +21,7 @@ library(dplyr)
 library(reticulate)
 library(shinyjqui)
 source("utils.R")
-reticulate::use_virtualenv("r-reticulate", required = TRUE)
+# reticulate::use_virtualenv("r-reticulate", required = TRUE)
 reticulate::source_python("PROTOCOL.py")
 
 
