@@ -6,7 +6,6 @@
 # 
 #    http://shiny.rstudio.com/
 #
-# setwd("D:/20Fall/Thesis/shiny/Bayes_opt")
 library(shiny)
 library(shinydashboard)
 library(readxl)
@@ -22,8 +21,8 @@ library(dplyr)
 library(reticulate)
 library(shinyjqui)
 source("utils.R")
-reticulate::use_condaenv("ml",required = TRUE)
-source_python("../PROTOCOL.py")
+reticulate::use_virtualenv("r-reticulate", required = TRUE)
+reticulate::source_python("PROTOCOL.py")
 
 
 shinyServer(function(input, output,session) {

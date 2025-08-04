@@ -1,0 +1,20 @@
+Type: Shiny
+Title: My App
+Description: Revived shiny app for XYZ
+Author: Zhiyun Gong
+Imports:
+    shiny,
+    shinydashboard,
+    readxl,
+    zoo,
+    rBayesianOptimization,
+    data.table,
+    magrittr,
+    GPfit,
+    rlist,
+    kernlab,
+    foreach,
+    dplyr,
+    reticulate,
+    shinyjqui
+Config/reticulate/python: python3

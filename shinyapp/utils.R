@@ -1,7 +1,6 @@
 library(kernlab)
 library(foreach)
 library(GPfit)
-use_virtualenv("ml")
 # py_run_string("import GPy")
 # source_python("gp_sample.py")
 
