@@ -8,6 +8,13 @@ import GPy
 import uuid
 import os 
 
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+
+def _scalar(z):
+    return float(np.asarray(z).reshape(-1)[0])
+
+
 class HyperRect:  
     def __init__(self,xmin,xmax,rescale=False,num_decimals=None,scaler=None,disallowed_configs=None,data=None):
         self.rescale = rescale
@@ -32,7 +39,7 @@ class HyperRect:
 
         if self.data is not None:
             for x in self.data:
-                if (xmin <= x).all() and (xmax > x).all():
+                if (self.xmin <= x).all() and (self.xmax > x).all():  # <- use self.xmin/self.xmax
                     self.X_in_interval.append(x)
             
             if len(self.X_in_interval) > 0:
@@ -45,14 +52,15 @@ class HyperRect:
         if self.num_decimals is not None:
             assert data is None
             assert self.scaler is not None
-            center = self.scaler.inverse_transform(self.center).flatten() + eps #addresses floating point shenanigans cause problem with scaler, ie. 2.5 will round to 2 instead of 3. 
+            center = self.scaler.inverse_transform(self.center).flatten() + eps
             closest_to_center = []
-            for i in range(len(num_decimals)):
-                rounded = np.around(center[i],self.num_decimals[i])
+            for i in range(len(self.num_decimals)):   # <- use self.num_decimals
+                rounded = np.around(center[i], self.num_decimals[i])
                 closest_to_center.append(rounded)
-            c = self.scaler.transform(np.array(closest_to_center).reshape(1,-1))
-            if (self.xmin <= c).all() and (self.xmax > c-eps).all():
-                self.closest_to_center = self.scaler.transform(np.array(closest_to_center).reshape(1,-1))
+            c = self.scaler.transform(np.array(closest_to_center).reshape(1, -1))
+            if (self.xmin <= c).all() and (self.xmax > c - eps).all():
+                self.closest_to_center = self.scaler.transform(np.array(closest_to_center).reshape(1, -1))
+
 
     def divide(self):
         longest_idx = np.argmax(
@@ -143,7 +151,7 @@ class HierarchicalTree:
             self.depth += 1
 
     def find_leaves(self):
-        return [node for node in self.tree.nodes if self.tree.nodes[node]["leaf"] == True]  
+        return [node for node in self.tree.nodes if self.tree.nodes[node]["leaf"]]  
 
 class OptimizerHandler:
     def __init__(self,max_evals,M,eta,Xi,Xi_max, \
@@ -195,11 +203,15 @@ class OptimizerHandler:
 
             print("Root initialized at {}".format(X_init))
             print("Function value at root: {}".format(y_init))
-            root.center_y = y_init
+            root.center_y = _scalar(y_init)
             self.T = HierarchicalTree(root,True)
-            self.gp = GPy.models.GPRegression(X_init,y_init,self.kernel,normalizer=normalize_y,noise_var=0)
+            self.gp = GPy.models.GPRegression(X_init,y_init,self.kernel,normalizer=normalize_y,noise_var=1e-6)
+            # Keep things in a sane range during early iterations
+            self.gp.likelihood.variance.constrain_bounded(1e-8, 1e-2)
+            self.gp.kern.variance.constrain_bounded(1e-6, 1e3)
+            self.gp.kern.lengthscale.constrain_bounded(1e-3, 10.0)
             self.gp.optimize()
-            self.f_plus = y_init.flatten()[0]
+            self.f_plus = _scalar(y_init)
             self.f_plusses.append(self.f_plus)
             self.X_evaluated = X_init 
             self.y_evaluated = y_init
@@ -273,7 +285,11 @@ class OptimizerHandler:
             assert (len(X) == len(y)),"Please provide the data points that were evaluated using the \"X\" argument, as well as their observed labels using the \"y\" argument"
             y = y.reshape(-1,1)
             X = self.scaler.transform(X)
-            self.gp = GPy.models.GPRegression(X,y,self.kernel,normalizer=normalize_y,noise_var=0)
+            self.gp = GPy.models.GPRegression(X,y,self.kernel,normalizer=normalize_y,noise_var=1e-6)
+            # Keep things in a sane range during early iterations
+            self.gp.likelihood.variance.constrain_bounded(1e-8, 1e-2)
+            self.gp.kern.variance.constrain_bounded(1e-6, 1e3)
+            self.gp.kern.lengthscale.constrain_bounded(1e-3, 10.0)
             list(self.T.tree.nodes)[0].center_y = y
             self.gp.optimize()
             self.f_plus = np.max(y) 
@@ -364,16 +380,21 @@ class OptimizerHandler:
         #assert (len(updates)==len(self.centers_to_eval)),"Incorrect number of ground truth labels provided. \
         #    Expected {0} but received {1}".format(len(self.centers_to_eval),len(updates))
         
-        var, ls, noise = self.params 
-        self.kernel = GPy.kern.src.sde_matern.sde_Matern52(input_dim=self.dim, variance=var, lengthscale=ls)
-        self.y_evaluated = y_update #np.vstack((self.y_evaluated,y_update.reshape(-1,1)))
+            # Rebuild kernel params (see fix #4)
+        var = float(self.params[0])
+        ls  = float(np.mean(self.params[1:-1])) if len(self.params) > 2 else float(self.params[1])
+        noise = float(self.params[-1])
+
+        self.kernel = GPy.kern.Matern52(input_dim=self.dim, variance=var, lengthscale=ls)
+        y_update = np.asarray(y_update).reshape(-1, 1)  # <- CRITICAL
+        self.y_evaluated = y_update 
 
         if self.continuous:
-            self.X_evaluated = self.X_evaluated #np.vstack((self.X_evaluated,X_update))
+            # self.X_evaluated unchanged in your design
             for node in self.T.tree.nodes:
-                for i,x in enumerate(X_update):
-                    if np.array_equal(node.center.flatten(),x):
-                        node.center_y = y_update[i]
+                for i, x in enumerate(X_update):
+                    if np.array_equal(node.center.flatten(), x):
+                        node.center_y = _scalar(y_update[i])
                         self.T.tree.nodes[node]["GP-based"] = False
         else:
             #account for case where only one value was analyzed
@@ -383,13 +404,13 @@ class OptimizerHandler:
                 X_update = self.scaler.transform(X_update.reshape(1,-1))
             self.X_evaluated = X_update #np.vstack((self.X_evaluated,X_update))
             for node in self.T.tree.nodes:
-                for i,x in enumerate(X_update):
-                    if np.array_equal(node.closest_to_center.flatten(),x):
-                        node.center_y = y_update[i]
+                for i, x in enumerate(X_update):
+                    if node.closest_to_center is not None and np.array_equal(node.closest_to_center.flatten(), x):
+                        node.center_y = _scalar(y_update[i])
                         self.T.tree.nodes[node]["GP-based"] = False
 
         self.gp = GPy.models.GPRegression(self.X_evaluated,self.y_evaluated,self.kernel,normalizer=self.normalize_y,noise_var=noise)
-        new_f_plus = np.max(self.y_evaluated)
+        new_f_plus = float(np.max(self.y_evaluated))
         self.num_evals = len(self.X_evaluated) 
 
         if new_f_plus > self.f_plus:
@@ -415,7 +436,7 @@ class OptimizerHandler:
                     i_leaves = [leaf for leaf in leaves if self.T.tree.nodes[leaf]["level"]==h]
                     if i_leaves:
                        while True:
-                            center_vals = [leaf.center_y for leaf in i_leaves]
+                            center_vals = [(-np.inf if leaf.center_y is None else leaf.center_y) for leaf in i_leaves]
                             i_star = np.argmax(center_vals)
                             max_interval = i_leaves[i_star]
                             max_center = center_vals[i_star]
@@ -476,13 +497,14 @@ class OptimizerHandler:
                                 for i,arr in enumerate(self.X_evaluated):
                                     if np.array_equal(child.closest_to_center.flatten(),arr):
                                         if not child.center_y:
-                                            child.center_y = self.y_evaluated[i]
+                                            child.center_y = _scalar(self.y_evaluated[i])
                                         self.T.tree.nodes[child]["GP-based"] = False
                             if self.T.tree.nodes[child]["GP-based"]: #difference- check both children, then fill queue using frontier 
                                 if self.continuous:
-                                    ucb, M_cur = self._compute_UCB(child.center,self.M)
+                                    ucb_arr, M_cur = self._compute_UCB(child.center,self.M)
                                 else:
-                                    ucb, M_cur = self._compute_UCB(child.closest_to_center,self.M)
+                                    ucb_arr, M_cur = self._compute_UCB(child.closest_to_center,self.M)
+                                ucb = _scalar(ucb_arr)
                                 if np.greater_equal(ucb,self.f_plus): 
                                     child.center_y = ucb
                                     second_half_queue.append(child)
@@ -568,7 +590,7 @@ class OptimizerHandler:
                 ch_best_ucb = {}
                 for i_ch in con_hull_idxs:
                     ch_pair_i = frontier_pairs[i_ch]
-                    ch_interval = frontier_queue[i_ch]
+                    # ch_interval = frontier_queue[i_ch]
                     ch_level = ch_pair_i[0]
                     ch_value = ch_pair_i[1]
                     if ch_level in ch_best_ucb:
@@ -625,12 +647,13 @@ class OptimizerHandler:
             cur_xi -= 1 
         return False, M 
 
-    def _compute_UCB(self,X,M):
-        sigmaM = np.sqrt(2*np.log((np.pi**2)*(M**2)/(12*self.eta)))+0.2
-        mean,var = self.gp.predict(X)
-        ucb = mean + sigmaM*np.sqrt(var)
+    def _compute_UCB(self, X, M):
+        sigmaM = np.sqrt(2*np.log((np.pi**2)*(M**2)/(12*self.eta))) + 0.2
+        mean, var = self.gp.predict(X)
+        ucb = _scalar(mean) + sigmaM * np.sqrt(_scalar(var))
         M += 1
-        return ucb, M 
+        return ucb, M
+
 
 def sin1(x):
     return (np.sin(13*x)*np.sin(27*x)+1)/2
@@ -656,17 +679,18 @@ def initialize(logging_dir,continuous,batch_size,max_evals, \
 
     if data is not None:
         dim = data.shape[1]
-        kernel = GPy.kern.src.sde_matern.sde_Matern52(input_dim=dim, variance=1., lengthscale=0.25)
+        kernel = GPy.kern.Matern52(input_dim=dim, variance=1., lengthscale=0.25)
+        experiment.initialized = True
         experiment.initialize_tree(kernel,X=data,dim=dim)
 
     else:
         if num_decimals is None and not continuous:
             print("No level of precision specified, rounding to 3 decimal places")
             num_decimals = [3]*len(xmin)
-        scaler = MinMaxScaler((0,0.999)).fit(np.array([xmin,xmax]))
+        # scaler = MinMaxScaler((0,0.999)).fit(np.array([xmin,xmax]))
         dim = len(xmin)
 
-        kernel = GPy.kern.src.sde_matern.sde_Matern52(input_dim=dim, variance=1., lengthscale=0.25)
+        kernel = GPy.kern.Matern52(input_dim=dim, variance=1., lengthscale=0.25)
         experiment.initialize_tree(kernel,X_min=xmin,X_max=xmax,num_decimals=num_decimals,dim=dim)
 
     eval_data = np.loadtxt(logging_dir+"/initial_data.csv",delimiter=",")
@@ -689,7 +713,7 @@ def update_PROTOCOL(X,y,optimizer_file,batch_size=None):
         experiment.update(X,y) 
         experiment.PROTOCOL()
     else:
-        kernel = GPy.kern.src.sde_matern.sde_Matern52(input_dim=experiment.dim, variance=1., lengthscale=0.25)
+        kernel = GPy.kern.Matern52(input_dim=experiment.dim, variance=1., lengthscale=0.25)
        # assert y_updates is not None 
         experiment.initialize_tree(kernel,X=X,y=y,dim=experiment.dim)
         experiment.PROTOCOL()
@@ -703,49 +727,49 @@ def update_PROTOCOL(X,y,optimizer_file,batch_size=None):
     return eval_data 
 
 
-if __name__ == '__main__':
+# if __name__ == '__main__':
     
     
-    ### EXAMPLE 1- initialize HPLC tree
-    ### uses xmax and xmin initialization
+#     ### EXAMPLE 1- initialize HPLC tree
+#     ### uses xmax and xmin initialization
     
-    #initial input space
-    xmin = np.array([1,1,0.2,5,25,260])
-    xmax = np.array([4,5,1.8,45,45,285])
-    num_decimals = [0,0,1,1,1,0]
+#     #initial input space
+#     xmin = np.array([1,1,0.2,5,25,260])
+#     xmax = np.array([4,5,1.8,45,45,285])
+#     num_decimals = [0,0,1,1,1,0]
 
-    #intial input values
-    logging_dir = "test_log/"
-    continuous = False 
-    batch_size = 3
-    max_evals = 25
+#     #intial input values
+#     logging_dir = "test_log/"
+#     continuous = False 
+#     batch_size = 10
+#     max_evals = 25
 
-    #initialize the tree- will request evaluation of root node
-    d1 = initialize(logging_dir,continuous,batch_size,max_evals,
-        xmin=xmin,
-        xmax=xmax,
-        num_decimals=num_decimals
-    )
+#     #initialize the tree- will request evaluation of root node
+#     d1 = initialize(logging_dir,continuous,batch_size,max_evals,
+#         xmin=xmin,
+#         xmax=xmax,
+#         num_decimals=num_decimals
+#     )
     
-    #made up y update, just meant to be illustrative
-    y1 = np.array([4.90])
+#     #made up y update, just meant to be illustrative
+#     y1 = np.array([9.0])
     
-    #update PROTOCOL by passing the X array, y array, and path to the optimizer.  You may specify a batch size.  
-    #The X and y arrays should have all data points previously evaluated
-    #The optimizer was made by the initialize function.
-    d2 = update_PROTOCOL(d1,y1,"test_log/initialize_optimizer.pkl",batch_size=batch_size)
+#     #update PROTOCOL by passing the X array, y array, and path to the optimizer.  You may specify a batch size.  
+#     #The X and y arrays should have all data points previously evaluated
+#     #The optimizer was made by the initialize function.
+#     d2 = update_PROTOCOL(d1,y1,"test_log/initialize_optimizer.pkl",batch_size=batch_size)
 
-    #made up second y update, just meant to be illustrative
-    y_requested = np.array([3,5,0]).reshape(-1,1)
+# #     #made up second y update, just meant to be illustrative
+#     y_requested = np.array([3,5,0]).reshape(-1,1)
  
-    #This time (and all times after the initial update), we refer to a history file made by PROTOCOL to obtain previously evaluated points.
-    #make sure the requested data points and their y values are index-matched
-    data = np.loadtxt("test_log/history.csv",delimiter=",").reshape(1,-1)
-    x2 = np.vstack((data[:,:-1],d2))
-    y2 = np.vstack((data[:,-1],y_requested))
+# #     #This time (and all times after the initial update), we refer to a history file made by PROTOCOL to obtain previously evaluated points.
+# #     #make sure the requested data points and their y values are index-matched
+# #     data = np.loadtxt("test_log/history.csv",delimiter=",").reshape(1,-1)
+# #     x2 = np.vstack((data[:,:-1],d2))
+# #     y2 = np.vstack((data[:,-1],y_requested))
 
-    #Update PROTOCOL as before.  Make sure to refer to correct X and y arrays, as well as the most recent optimizer.
-    d3 = update_PROTOCOL(x2,y2,"test_log/1_1_optimizer.pkl",batch_size=batch_size)
+# #     #Update PROTOCOL as before.  Make sure to refer to correct X and y arrays, as well as the most recent optimizer.
+# #     d3 = update_PROTOCOL(x2,y2,"test_log/1_1_optimizer.pkl",batch_size=batch_size)
     
 
 
