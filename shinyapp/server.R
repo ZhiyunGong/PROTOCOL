@@ -21,8 +21,8 @@ library(dplyr)
 library(reticulate)
 library(shinyjqui)
 source("utils.R")
-# reticulate::use_virtualenv("r-reticulate", required = TRUE)
-reticulate::source_python("PROTOCOL.py")
+reticulate::use_virtualenv("r-reticulate", required = TRUE)
+reticulate::source_python("shinyapp/PROTOCOL_shiny.py")
 
 
 shinyServer(function(input, output,session) {
